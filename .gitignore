@@ -21,7 +21,8 @@ env/
 .ruff_cache/
 .idea/
 .vscode/
-.claude/
+.claude/*
+!.claude/agents/
 CLAUDE.local.md
 
 # App runtime files
