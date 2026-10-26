@@ -61,6 +61,10 @@ python main.py scans/ --shrink
 - 压缩只重新压缩图像。纯文字 PDF 几乎不会变小；无法变小的文件会提示且不生成结果。1 位（传真式）图像和带透明蒙版的图像保持原样。
 - 不会自动下载或替换新版本。
 
+## 反馈
+
+问题或建议可点击窗口顶部的**发送反馈**，或在 <https://chaekgalpi.co.kr/en/tools/pdfmerge#feedback> 提交（英文页面），无需登录。程序只会在浏览器中打开工具页面，本身不发送任何内容。[GitHub Issues](https://github.com/microhan1/pdf-merge-split/issues) 也照常接收。
+
 ## 系列
 
 - 书签工具：[双页拆分](https://github.com/microhan1/scan-pdf-split) · [扫描PDF清晰化](https://github.com/microhan1/scan-pdf-cleanup) · [裁边距 TrimPDF](https://github.com/microhan1/TrimPDF) · [PDF 添加目录](https://github.com/microhan1/pdf-toc-add)

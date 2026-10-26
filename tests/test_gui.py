@@ -416,6 +416,9 @@ def test_no_worker_thread_holds_the_window(env, tmp_path, monkeypatch):
             started.append((target, args, kwargs or {}))
 
     monkeypatch.setattr(gui.threading, "Thread", Capture)
+    # The update check's thread starts 1.5 s after the window; on a slow machine it landed
+    # in `started` here. It has its own test (test_the_thread_holds_no_tk_object).
+    monkeypatch.setattr(gui.update_check, "check_async", lambda *a, **k: False)
     app = gui.App()
     app.nb.select(1)
     app.add_paths([s])                                      # preview + estimate threads

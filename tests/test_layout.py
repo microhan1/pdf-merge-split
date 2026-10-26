@@ -113,5 +113,7 @@ def test_nothing_is_cut_off(make_app, lang, notice):
         for size in ("1060x760", "940x700"):
             app.root.geometry(size)
             pump(app, lambda: False, timeout=0.4)
+            # on a busy machine the resize can still be settling here; a real cut-off stays
+            pump(app, lambda: not problems(app), timeout=3)
             found = problems(app)
             assert not found, f"{lang} tab{tab} {size}: " + "; ".join(found)

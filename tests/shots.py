@@ -10,7 +10,8 @@ the update server is never asked (the notice scene uses a faked answer), and
 the sample PDFs are copied to a temporary folder first so no result lands in
 the repository.
 
-Files written per language:  gui_<lang>.png (merge tab), shrink_<lang>.png.
+Files written per language:  gui_<lang>.png (merge tab), shrink_<lang>.png,
+feedback_<lang>.png (the header row with the [Send feedback] link).
 For Korean also: done_ko.png (after a shrink run), update_notice.png, and the
 layout check that the notice moves nothing above it.
 """
@@ -143,6 +144,10 @@ def shoot(lang: str, out: str, notice: bool) -> None:
     pump(app, lambda: False, 0.6)
     before = grab(app.root)
     before.save(os.path.join(out, f"gui_{lang}.png"))
+    # the header row alone: language, update check and the [Send feedback] link
+    head = app.lnk_feedback.master
+    before.crop((0, 0, before.width, head.winfo_rooty() - app.root.winfo_rooty() + head.winfo_height())).save(
+        os.path.join(out, f"feedback_{lang}.png"))
     if notice:
         # The notice arrives 1.5 s after start. Only the stretching middle row (options |
         # preview) may give up height for it: the header and file list above must be

@@ -41,6 +41,7 @@ FRAME_W, FRAME_H = 16, 40            # window borders and title bar around the c
 OPTIONS_WIDTH = 400                  # the options column (wraplength of its hints)
 UPDATE_BG, UPDATE_BORDER = "#eff6ff", "#bfdbfe"   # the new-version notice line
 HINT_FG, BAD_FG = "#666", "#c0392b"
+LINK_FG = "#1d4ed8"                  # the [Send feedback] link
 POLL_MS = 100                        # how often the Tk thread drains the worker queue
 ESTIMATE_DELAY_MS = 350
 PROGRESS_STEPS = 1000
@@ -263,6 +264,12 @@ class App:
         self.chk_update = self._reg(ttk.Checkbutton(head, variable=self.var_update_check,
                                                     command=self._on_update_toggle), "opt_update_check")
         self.chk_update.grid(row=0, column=3, padx=(14, 0))
+        # a small link, not a button: it only opens the tool's page in the browser
+        self.lnk_feedback = self._reg(ttk.Label(head, foreground=LINK_FG, cursor="hand2", takefocus=True,
+                                                font=(family, 9, "underline")), "lnk_feedback")
+        self.lnk_feedback.grid(row=0, column=4, padx=(14, 0))
+        for seq in ("<Button-1>", "<Return>", "<space>"):
+            self.lnk_feedback.bind(seq, lambda _e: self._open_feedback())
 
         # ---- files
         files = ttk.LabelFrame(root, padding=6)
@@ -471,6 +478,20 @@ class App:
         self._save_state()
         if not self.update_prefs.update_check:
             self._hide_update_notice()
+
+    # ------------------------------------------------------------ feedback
+    def _open_feedback(self) -> None:
+        """Open the feedback form on the tools site in the browser. Nothing is sent from
+        here. If no browser opens, the address goes to the log (selectable) and a message
+        box, so it can be copied by hand."""
+        url = update_check.feedback_url(update_check.SLUG, APP_VERSION, i18n.current_lang())
+        try:
+            opened = webbrowser.open(url)
+        except Exception:  # webbrowser.Error, OSError: no browser, broken association
+            opened = False
+        if not opened:
+            self.log("log_feedback_url", url=url)
+            messagebox.showwarning(t("lnk_feedback"), t("msg_feedback_failed", url=url), parent=self.root)
 
     # ------------------------------------------------------------ helpers
     def mode(self) -> str:

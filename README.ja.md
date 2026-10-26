@@ -61,6 +61,10 @@ python main.py scans/ --shrink
 - 圧縮は画像の再圧縮だけです。文字だけの PDF はほとんど小さくならず、小さくならないファイルは結果を作らず知らせます。1 ビット（FAX 型）の画像と透明マスク付きの画像はそのままにします。
 - 新しいバージョンを自動でダウンロード・置き換えしません。
 
+## ご意見
+
+不具合・ご要望は、ウィンドウ上部の**ご意見を送る**から、または <https://chaekgalpi.co.kr/en/tools/pdfmerge#feedback> からログインなしで送れます（英語のページです）。ブラウザでツールのページが開くだけで、プログラムが直接送信することはありません。[GitHub Issues](https://github.com/microhan1/pdf-merge-split/issues) も引き続き受け付けています。
+
 ## シリーズ
 
 - しおりツール: [見開き分割](https://github.com/microhan1/scan-pdf-split) · [スキャンPDF補正](https://github.com/microhan1/scan-pdf-cleanup) · [余白トリミング TrimPDF](https://github.com/microhan1/TrimPDF) · [PDF 目次追加](https://github.com/microhan1/pdf-toc-add)

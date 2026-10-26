@@ -61,6 +61,10 @@ When a newer version exists a one-line notice appears at the bottom of the windo
 - Compressing only re-encodes images. A text-only PDF barely shrinks; a file that would not get smaller is reported and no result is written. 1-bit (fax-like) images and images with a transparency mask are left as they are.
 - It never downloads or installs a new version by itself.
 
+## Feedback
+
+Tell us what's broken or missing with **Send feedback** at the top of the window, or at <https://chaekgalpi.co.kr/en/tools/pdfmerge#feedback> - no sign-in needed. It only opens the tool's page in your browser; the program itself sends nothing. [GitHub Issues](https://github.com/microhan1/pdf-merge-split/issues) are welcome too.
+
 ## Series
 
 - Chaekgalpi Tools: [Two-page Split](https://github.com/microhan1/scan-pdf-split) · [Scan PDF Cleanup](https://github.com/microhan1/scan-pdf-cleanup) · [TrimPDF](https://github.com/microhan1/TrimPDF) · [PDF TOC Add](https://github.com/microhan1/pdf-toc-add)

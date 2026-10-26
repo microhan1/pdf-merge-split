@@ -5,6 +5,9 @@ information. The request runs on a background thread 1.5 s after the window is s
 never blocks the UI; any failure (offline, timeout, HTTP error, bad JSON) is silent. The
 server decides whether the version is older (`updateAvailable`); null means "cannot
 compare" and shows nothing. Standard library only.
+
+feedback_url() only builds the address [Send feedback] hands to the browser; the
+program itself sends nothing for it.
 """
 from __future__ import annotations
 
@@ -100,6 +103,22 @@ def page_for(info: UpdateInfo, lang: str) -> str:
     if lang != "ko" and info.url_en and info.url_en.startswith(SITE):
         return info.url_en
     return info.url
+
+
+def feedback_url(slug: str, version, lang) -> str:
+    """The feedback form on the tool's page, for [Send feedback] to open in the browser.
+    Built from constants only - never from settings or a server answer. Korean screens
+    (and anything unknown) get the Korean page; English, Japanese and Chinese screens get
+    the English page (there is no Japanese or Chinese one). utm_source=app tells the site
+    it came from the program; #feedback scrolls to the form. The version is percent-encoded
+    so nothing in it can break the address, and left out when empty."""
+    code = lang.strip().lower().replace("_", "-") if isinstance(lang, str) else ""
+    page = "en/tools" if code.split("-")[0] in ("en", "ja", "zh") else "tools"
+    query = "utm_source=app&utm_medium=feedback"
+    version = version.strip() if isinstance(version, str) else ""
+    if version:
+        query += "&v=" + urllib.parse.quote(version, safe="")
+    return f"{SITE}{page}/{urllib.parse.quote(slug, safe='')}?{query}#feedback"
 
 
 def check_async(root, slug: str, version: str, prefs, on_result: Callable[[UpdateInfo | None, bool], None], *,
