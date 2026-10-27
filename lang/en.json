@@ -6,6 +6,7 @@
   "btn_update": "Update",
   "btn_later": "Later",
   "lnk_feedback": "Send feedback",
+  "tip_feedback": "Tell us what's broken or missing (opens your browser)",
   "msg_feedback_failed": "Could not open a browser. Paste the address below into your browser. It is also in the log (Ctrl+C copies this message).\n\n{url}",
   "log_feedback_url": "Feedback page: {url}",
   "lbl_files": "Files",

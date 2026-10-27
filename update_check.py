@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable
 
+from i18n import DEFAULT_LANG
+
 API = "https://chaekgalpi.co.kr/api/tools/{slug}/latest"
 SITE = "https://chaekgalpi.co.kr/"  # the notice only ever opens a page on this site
 SLUG = "pdfmerge"                   # this tool's name on the Chaekgalpi tools site
@@ -97,10 +99,20 @@ def interpret(data: dict | None, version: str, skipped: str = "") -> UpdateInfo 
     return UpdateInfo(latest, version, url, url_en)
 
 
-def page_for(info: UpdateInfo, lang: str) -> str:
+def is_korean_page(lang) -> bool:
+    """The one rule for which page of the tools site a screen language gets, shared by
+    [Update] and [Send feedback]: a code whose primary subtag is "ko" (ko, ko-KR, KO,
+    ko_KR) gets the Korean page; every other code - listed or not (en, ja, zh, zh-TW,
+    fr...) - gets the English one. None, empty or not a string means this tool's
+    default screen language."""
+    code = lang.strip().lower().replace("_", "-") if isinstance(lang, str) else ""
+    return (code or DEFAULT_LANG.lower()).split("-")[0] == "ko"
+
+
+def page_for(info: UpdateInfo, lang) -> str:
     """The page [Update] opens: Korean screens get the Korean page; every other
     language gets the English page when the server gave one on the tools site."""
-    if lang != "ko" and info.url_en and info.url_en.startswith(SITE):
+    if not is_korean_page(lang) and info.url_en and info.url_en.startswith(SITE):
         return info.url_en
     return info.url
 
@@ -108,12 +120,11 @@ def page_for(info: UpdateInfo, lang: str) -> str:
 def feedback_url(slug: str, version, lang) -> str:
     """The feedback form on the tool's page, for [Send feedback] to open in the browser.
     Built from constants only - never from settings or a server answer. Korean screens
-    (and anything unknown) get the Korean page; English, Japanese and Chinese screens get
-    the English page (there is no Japanese or Chinese one). utm_source=app tells the site
-    it came from the program; #feedback scrolls to the form. The version is percent-encoded
-    so nothing in it can break the address, and left out when empty."""
-    code = lang.strip().lower().replace("_", "-") if isinstance(lang, str) else ""
-    page = "en/tools" if code.split("-")[0] in ("en", "ja", "zh") else "tools"
+    get the Korean page and every other language the English one (is_korean_page; there
+    is no Japanese or Chinese page). utm_source=app tells the site it came from the
+    program; #feedback scrolls to the form. The version is percent-encoded so nothing in
+    it can break the address, and left out when empty."""
+    page = "tools" if is_korean_page(lang) else "en/tools"
     query = "utm_source=app&utm_medium=feedback"
     version = version.strip() if isinstance(version, str) else ""
     if version:

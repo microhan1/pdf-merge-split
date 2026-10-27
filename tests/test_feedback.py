@@ -39,9 +39,12 @@ def test_exact_address_per_language(lang, expected):
     assert uc.feedback_url("pdfmerge", "0.1.1", lang) == expected
 
 
+# 2026-10-27 series rule: only Korean gets the Korean page; any other code, listed or
+# not, gets the English one, and no language at all means the default screen language
+# (English). More cases in test_feedback_followup.py.
 @pytest.mark.parametrize("lang", [None, "", "fr", "de-DE", "xx", "  ", 42, ["en"]])
-def test_unknown_language_gets_the_korean_page(lang):
-    assert uc.feedback_url("pdfmerge", "0.1.1", lang) == KO
+def test_unknown_language_gets_the_english_page(lang):
+    assert uc.feedback_url("pdfmerge", "0.1.1", lang) == EN
 
 
 @pytest.mark.parametrize("lang, expected", [("EN", EN), ("En", EN), ("zh-cn", EN), ("ZH-CN", EN), ("zh_CN", EN),

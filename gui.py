@@ -42,6 +42,8 @@ OPTIONS_WIDTH = 400                  # the options column (wraplength of its hin
 UPDATE_BG, UPDATE_BORDER = "#eff6ff", "#bfdbfe"   # the new-version notice line
 HINT_FG, BAD_FG = "#666", "#c0392b"
 LINK_FG = "#1d4ed8"                  # the [Send feedback] link
+LINK_FOCUS_BG = "#dbeafe"            # ...while it has the keyboard focus
+TIP_BG, TIP_FG, TIP_BORDER = "#ffffe1", "#222", "#8a8a8a"   # tooltips
 POLL_MS = 100                        # how often the Tk thread drains the worker queue
 ESTIMATE_DELAY_MS = 350
 PROGRESS_STEPS = 1000
@@ -63,6 +65,87 @@ def _saved_state(settings: dict) -> tuple[str, MergeOptions, ShrinkOptions]:
     shrink = ShrinkOptions(quality=q if isinstance(q, str) else pdfops.DEFAULT_QUALITY,
                            dpi=d if isinstance(d, int) and not isinstance(d, bool) else pdfops.DEFAULT_DPI).validated()
     return mode, merge, shrink
+
+
+class Tooltip:
+    """A small note under a widget while the mouse rests on it. It holds the widget and
+    a language key only - never the App - and reads the text each time it is shown, so
+    a language change reaches it (refresh() also updates one that is open). The note
+    is kept inside the widget's window, so it is never cut off at the screen edge while
+    the window itself is on screen."""
+
+    DELAY_MS = 500
+    GAP = 4
+
+    def __init__(self, widget: tk.Misc, key: str) -> None:
+        self.widget, self.key = widget, key
+        self.tip: tk.Toplevel | None = None
+        self.label: tk.Label | None = None
+        self._job: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        # <Button-1> too: a widget's own <Button-1> binding is more specific than
+        # <ButtonPress>, and Tk runs only the most specific one
+        widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<Button-1>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._job = self.widget.after(self.DELAY_MS, self.show)
+
+    def _cancel(self) -> None:
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+
+    def show(self) -> None:
+        self._job = None
+        if self.tip is None:
+            try:
+                tip = tk.Toplevel(self.widget, background=TIP_BORDER)
+            except tk.TclError:          # the window is going away
+                return
+            tip.wm_overrideredirect(True)
+            try:
+                tip.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            self.label = tk.Label(tip, background=TIP_BG, foreground=TIP_FG, justify="left",
+                                  padx=6, pady=3, wraplength=320)
+            self.label.pack(padx=1, pady=1)
+            self.tip = tip
+        self.label.configure(text=t(self.key))
+        self._place()
+
+    def _place(self) -> None:
+        tip, w = self.tip, self.widget
+        tip.update_idletasks()
+        tw, th = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        top = w.winfo_toplevel()
+        left, upper = top.winfo_rootx(), top.winfo_rooty()
+        right, lower = left + top.winfo_width(), upper + top.winfo_height()
+        x = max(left, min(w.winfo_rootx(), right - tw))
+        y = w.winfo_rooty() + w.winfo_height() + self.GAP
+        if y + th > lower:               # no room below: above the widget instead
+            y = max(upper, w.winfo_rooty() - self.GAP - th)
+        tip.wm_geometry(f"+{x}+{y}")
+
+    def refresh(self) -> None:
+        if self.tip is not None:
+            self.show()
+
+    def hide(self, _event=None) -> None:
+        self._cancel()
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = self.label = None
 
 
 # ------------------------------------------------------------------ workers
@@ -270,6 +353,10 @@ class App:
         self.lnk_feedback.grid(row=0, column=4, padx=(14, 0))
         for seq in ("<Button-1>", "<Return>", "<space>"):
             self.lnk_feedback.bind(seq, lambda _e: self._open_feedback())
+        # Tab reaches it (takefocus); a ttk label draws no focus ring, so it shows one itself
+        self.lnk_feedback.bind("<FocusIn>", lambda _e: self.lnk_feedback.configure(background=LINK_FOCUS_BG))
+        self.lnk_feedback.bind("<FocusOut>", lambda _e: self.lnk_feedback.configure(background=""))
+        self.tip_feedback = Tooltip(self.lnk_feedback, "tip_feedback")
 
         # ---- files
         files = ttk.LabelFrame(root, padding=6)
@@ -418,6 +505,7 @@ class App:
                 pass
         self.nb.tab(0, text=t("tab_merge"))
         self.nb.tab(1, text=t("tab_shrink"))
+        self.tip_feedback.refresh()
         self._refresh_list()
         self._update_pages_hint()
         self._update_merge_summary()

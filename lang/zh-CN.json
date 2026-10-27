@@ -6,6 +6,7 @@
   "btn_update": "更新",
   "btn_later": "以后",
   "lnk_feedback": "发送反馈",
+  "tip_feedback": "告诉我们问题或建议（将打开浏览器）",
   "msg_feedback_failed": "无法打开浏览器。请将下面的地址粘贴到浏览器中。地址也已写入日志（按 Ctrl+C 可复制此提示）。\n\n{url}",
   "log_feedback_url": "反馈页面: {url}",
   "lbl_files": "文件列表",
