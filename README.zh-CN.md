@@ -1,8 +1,8 @@
-# 书签工具 – PDF 合并·压缩
+# 书签工具 – PDF 合并·拆分·压缩
 
 [한국어](README.md) · [English](README.en.md) · [日本語](README.ja.md)
 
-把多个 PDF 拖进来就能**合并**为一个，或者重新压缩其中的图像来**减小体积**。这是一个不上传任何文件的 Windows 程序：合同、病历、扫描的书籍——凡是不想交给别人服务器的 PDF，都在自己的电脑上处理。无服务器（仅版本检查例外，可关闭）、无需安装、不限页数、原文件不会被修改。
+把多个 PDF 拖进来就能**合并**为一个，重新压缩其中的图像来**减小体积**，或者把一个文件**拆分**成多个。这是一个不上传任何文件的 Windows 程序：合同、病历、扫描的书籍——凡是不想交给别人服务器的 PDF，都在自己的电脑上处理。无服务器（仅版本检查例外，可关闭）、无需安装、不限页数、原文件不会被修改。
 
 ![程序界面](docs/gui_zh-CN.png)
 
@@ -22,11 +22,16 @@ python main.py
 2. 选择标签页。
    - **合并**：每个文件可指定要加入的页（`1-10, 15, 20-`）。各文件的书签（目录）会归在以文件名命名的条目下原样保留。输出：`首个文件名_merged.pdf`。
    - **压缩**：选择图像质量（普通·较小·最小）和分辨率上限（300·200·150 dpi），即显示预计大小。只重新压缩图像，文字（可搜索）、书签、链接、页面尺寸都保持不变。输出：`原文件名_small.pdf`。
+   - **拆分**：按页码范围（`1-10, 11-25`）、每隔相同页数、每个一级书签（章）拆分，或使每个文件不超过设定大小（MB）。运行前会显示所选文件将拆成几个。每个部分保留其页面上的书签和链接。输出：`原文件名_part01.pdf`、`原文件名_part02.pdf` …
 3. 点击**开始**，结果写在原文件旁边。若同名文件已存在，则加上 `(2)`、`(3)`；原文件绝不改动。
 
 ![压缩结果](docs/done_ko.png)
 
 *示例扫描 PDF（3 页，2.0 MB）以"普通·200 dpi"压缩后的界面（韩文界面）。实际数字因文件而异。*
+
+![拆分标签页](docs/split_zh-CN.png)
+
+*示例报告（6 页，3 章）选择「每个一级书签一个文件」的界面。运行前显示「所选文件 → 3 个文件（页数 2, 2, 2）」。*
 
 也可以在命令行使用。
 
@@ -35,6 +40,10 @@ python main.py a.pdf b.pdf c.pdf --merge
 python main.py a.pdf b.pdf --merge --pages 1-10 --pages all
 python main.py scan.pdf --shrink --quality small --dpi 150
 python main.py scans/ --shrink
+python main.py book.pdf --split --every 50
+python main.py book.pdf --split --ranges "1-10, 11-25"
+python main.py book.pdf --split --by-bookmarks
+python main.py scan.pdf --split --max-mb 10
 ```
 
 `python main.py --help` 会按系统语言（한국어 · English · 中文 · 日本語）显示选项。
@@ -55,7 +64,6 @@ python main.py scans/ --shrink
 
 ## 不做的事
 
-- 拆分（页码范围、每 N 页、按书签）计划在 v0.2 加入。
 - 不做 OCR、不编辑文字、不旋转、不裁边距（裁边距请用 [TrimPDF](https://github.com/microhan1/TrimPDF)）。
 - 加密的 PDF 会提示后跳过，不会解除密码。
 - 压缩只重新压缩图像。纯文字 PDF 几乎不会变小；无法变小的文件会提示且不生成结果。1 位（传真式）图像和带透明蒙版的图像保持原样。

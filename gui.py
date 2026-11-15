@@ -24,7 +24,7 @@ import i18n
 import pdfops
 import update_check
 from i18n import t
-from pdfops import MergeOptions, ShrinkOptions
+from pdfops import MergeOptions, ShrinkOptions, SplitOptions
 from version import APP_VERSION
 
 try:
@@ -49,7 +49,7 @@ ESTIMATE_DELAY_MS = 350
 PROGRESS_STEPS = 1000
 
 
-def _saved_state(settings: dict) -> tuple[str, MergeOptions, ShrinkOptions]:
+def _saved_state(settings: dict) -> tuple[str, MergeOptions, ShrinkOptions, SplitOptions]:
     """Mode and options from settings.json, trusting nothing about its types.
     The file sits beside the exe where anyone can edit it; one wrong value
     must not stop the window from opening."""
@@ -64,7 +64,14 @@ def _saved_state(settings: dict) -> tuple[str, MergeOptions, ShrinkOptions]:
     q, d = s.get("quality"), s.get("dpi")
     shrink = ShrinkOptions(quality=q if isinstance(q, str) else pdfops.DEFAULT_QUALITY,
                            dpi=d if isinstance(d, int) and not isinstance(d, bool) else pdfops.DEFAULT_DPI).validated()
-    return mode, merge, shrink
+    x = settings.get("split")
+    x = x if isinstance(x, dict) else {}
+    smode, every, mb, skeep = x.get("mode"), x.get("every"), x.get("max_mb"), x.get("keep_bookmarks")
+    split = SplitOptions(mode=smode if isinstance(smode, str) else pdfops.DEFAULT_SPLIT_MODE,
+                         every=every if isinstance(every, int) and not isinstance(every, bool) else pdfops.DEFAULT_EVERY,
+                         max_mb=mb if isinstance(mb, (int, float)) and not isinstance(mb, bool) else pdfops.DEFAULT_MAX_MB,
+                         keep_bookmarks=skeep if isinstance(skeep, bool) else True).validated()
+    return mode, merge, shrink, split
 
 
 class Tooltip:
@@ -153,10 +160,13 @@ class Tooltip:
 # values they are given and the queue they report into.
 
 def _job_worker(mode: str, files: list[str], specs: dict[str, str], merge_opts: MergeOptions,
-                shrink_opts: ShrinkOptions, cancel: threading.Event, q: "queue.Queue") -> None:
+                shrink_opts: ShrinkOptions, split_opts: SplitOptions, cancel: threading.Event,
+                q: "queue.Queue") -> None:
     try:
         if mode == "merge":
             _merge_job(files, specs, merge_opts, cancel, q)
+        elif mode == "split":
+            _split_job(files, split_opts, cancel, q)
         else:
             _shrink_job(files, shrink_opts, cancel, q)
     except Exception as exc:  # pragma: no cover - last resort, keeps the window usable
@@ -240,6 +250,79 @@ def _shrink_job(files, opts, cancel, q) -> None:
     q.put(("done", "shrink", {"count": count, "before": before, "after": after, "skipped": failed}))
 
 
+def _split_job(files, opts, cancel, q) -> None:
+    count = failed = parts = 0
+    n = len(files)
+    for idx, path in enumerate(files):
+        name = os.path.basename(path)
+
+        def progress(done: int, total: int, _i=idx, _n=name) -> None:
+            q.put(("progress", (_i + done / max(total, 1)) / n, _n))
+
+        try:
+            r = pdfops.split_pdf(path, opts, progress=progress, cancel=cancel)
+        except pdfops.Cancelled:
+            q.put(("cancelled", name))
+            return
+        except pdfops.NothingToSplit:
+            q.put(("log", "err_nothing_to_split", {"name": name}))
+            continue
+        except pdfops.NoBookmarks:
+            q.put(("log", "err_no_bookmarks", {"name": name}))
+            failed += 1
+            continue
+        except pdfops.InvalidPageRange as exc:
+            q.put(("log", "err_page_range", {"token": exc.token, "name": name, "pages": exc.pages}))
+            failed += 1
+            continue
+        except pdfops.PasswordRequired:
+            q.put(("log", "err_password", {"name": name}))
+            failed += 1
+            continue
+        except pdfops.EmptyDocument:
+            q.put(("log", "err_empty_pdf", {"name": name}))
+            failed += 1
+            continue
+        except Exception as exc:  # one bad file must not end the batch
+            q.put(("log", "err_file_failed", {"name": name, "error": str(exc)}))
+            failed += 1
+            continue
+        count += 1
+        parts += len(r.outputs)
+        for out in r.outputs:
+            q.put(("saved", out))
+        q.put(("log", "log_split_summary", {"pages": r.pages, "parts": len(r.outputs),
+                                            "counts": pdfops.counts_text(r.part_pages)}))
+        if r.oversized:
+            q.put(("log", "log_split_oversized", {"count": len(r.oversized), "mb": f"{opts.max_mb:g}"}))
+    q.put(("done", "split", {"files": count, "parts": parts, "skipped": failed}))
+
+
+def _split_plan_worker(path: str, opts: SplitOptions, gen: int, live: dict, cancel: threading.Event,
+                       q: "queue.Queue") -> None:
+    """Pages per part for the selected file, or the reason it cannot be split."""
+    if live.get("gen") != gen or cancel.is_set():
+        return
+    name = os.path.basename(path)
+    try:
+        counts = pdfops.preview_split(path, opts, cancel)
+    except pdfops.Cancelled:
+        return
+    except pdfops.InvalidPageRange as exc:
+        q.put(("split_plan", gen, None, ("lbl_pages_bad", {"token": exc.token, "pages": exc.pages})))
+        return
+    except pdfops.NoBookmarks:
+        q.put(("split_plan", gen, None, ("err_no_bookmarks", {"name": name})))
+        return
+    except pdfops.NothingToSplit:
+        q.put(("split_plan", gen, None, ("err_nothing_to_split", {"name": name})))
+        return
+    except Exception:
+        q.put(("split_plan", gen, None, ("err_open_failed", {"name": name})))
+        return
+    q.put(("split_plan", gen, counts, None))
+
+
 def _preview_worker(path: str, gen: int, q: "queue.Queue") -> None:
     try:
         image = pdfops.render_first_page(path, (PREVIEW_W * 2, PREVIEW_H * 2))
@@ -286,6 +369,11 @@ class App:
         self.estimate_gen = 0
         self._live = {"gen": 0}
         self.estimate_job: str | None = None
+        self.split_gen = 0
+        self._split_live = {"gen": 0}
+        self.split_job: str | None = None
+        self._split_view: tuple[str, dict, bool] | None = None   # (key, kwargs, is_error) of the split summary
+        self._split_planning = False
         self.preview_file: str | None = None
         self._preview: Image.Image | None = None
         self._photos: list[ImageTk.PhotoImage] = []
@@ -299,12 +387,19 @@ class App:
         self._running = False
 
         settings = i18n.load_settings()
-        mode, merge_opts, shrink_opts = _saved_state(settings)
+        mode, merge_opts, shrink_opts, split_opts = _saved_state(settings)
         self._mode = mode
         self.var_pages = tk.StringVar(value="")
         self.var_keep_bookmarks = tk.BooleanVar(value=merge_opts.keep_bookmarks)
         self.var_quality = tk.StringVar(value=shrink_opts.quality)
         self.var_dpi = tk.IntVar(value=shrink_opts.dpi)
+        # the split tab: plain StringVars read through SplitOptions.validated(), so text
+        # typed into a spinbox can never raise; no trace (it would hold the App, LESSONS A2)
+        self.var_split_mode = tk.StringVar(value=split_opts.mode)
+        self.var_split_ranges = tk.StringVar(value="")
+        self.var_split_every = tk.StringVar(value=str(split_opts.every))
+        self.var_split_mb = tk.StringVar(value=f"{split_opts.max_mb:g}")
+        self.var_split_keep = tk.BooleanVar(value=split_opts.keep_bookmarks)
         self.var_lang = tk.StringVar(value=i18n.LANG_NAMES[i18n.current_lang()])
         self.update_prefs = update_check.prefs_from_settings(settings)
         self.var_update_check = tk.BooleanVar(value=self.update_prefs.update_check)
@@ -443,6 +538,49 @@ class App:
         self.lbl_estimate = ttk.Label(tab_s, font=bold, wraplength=wrap, justify="left")
         self.lbl_estimate.pack(anchor="w", pady=(12, 0))
 
+        # split tab: one row per way, the value next to its radio button
+        tab_x = ttk.Frame(self.nb, padding=10)
+        self.nb.add(tab_x, text="")
+        f_how = self._reg(ttk.LabelFrame(tab_x, padding=4), "opt_split_how")
+        f_how.pack(fill="x", pady=(0, 4))
+        f_how.columnconfigure(1, weight=1)
+        self.rb_split: dict[str, ttk.Radiobutton] = {}
+        for k in pdfops.SPLIT_MODES:
+            self.rb_split[k] = self._reg(ttk.Radiobutton(f_how, variable=self.var_split_mode, value=k,
+                                                         command=self._on_split_option), f"split_{k}")
+        self.rb_split["ranges"].grid(row=0, column=0, sticky="w")
+        self.ent_split_ranges = ttk.Entry(f_how, textvariable=self.var_split_ranges, width=14)
+        self.ent_split_ranges.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(4, 0))
+        self.lbl_split_ranges_hint = self._reg(ttk.Label(f_how, foreground=HINT_FG), "lbl_split_ranges_hint")
+        self.lbl_split_ranges_hint.grid(row=1, column=0, columnspan=3, sticky="w", padx=(22, 0))
+        # a number box and its unit share one cell, so the unit stays next to the number
+        self.rb_split["every"].grid(row=2, column=0, sticky="w", pady=(2, 0))
+        row_every = ttk.Frame(f_how)
+        row_every.grid(row=2, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=(2, 0))
+        self.spn_split_every = ttk.Spinbox(row_every, from_=pdfops.EVERY_RANGE[0], to=pdfops.EVERY_RANGE[1], increment=1,
+                                           width=7, textvariable=self.var_split_every, command=self._on_split_option)
+        self.spn_split_every.pack(side="left")
+        self._reg(ttk.Label(row_every), "unit_pages_each").pack(side="left", padx=(4, 0))
+        self.rb_split["bookmarks"].grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.rb_split["size"].grid(row=4, column=0, sticky="w", pady=(2, 0))
+        row_mb = ttk.Frame(f_how)
+        row_mb.grid(row=4, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=(2, 0))
+        self.spn_split_mb = ttk.Spinbox(row_mb, from_=pdfops.MAX_MB_RANGE[0], to=pdfops.MAX_MB_RANGE[1], increment=1,
+                                        width=7, textvariable=self.var_split_mb, command=self._on_split_option)
+        self.spn_split_mb.pack(side="left")
+        self._reg(ttk.Label(row_mb), "unit_mb").pack(side="left", padx=(4, 0))
+        for w, way in ((self.ent_split_ranges, "ranges"), (self.spn_split_every, "every"), (self.spn_split_mb, "size")):
+            # typing in a box picks its way; the summary follows after a short pause
+            w.bind("<KeyRelease>", lambda _e, _w=way: self._on_split_typed(_w), add="+")
+            w.bind("<FocusOut>", lambda _e: self._on_split_option(), add="+")
+        self.chk_split_keep = self._reg(ttk.Checkbutton(tab_x, variable=self.var_split_keep,
+                                                        command=self._save_state), "opt_split_keep_bookmarks")
+        self.chk_split_keep.pack(anchor="w")
+        self._reg(ttk.Label(tab_x, foreground=HINT_FG, wraplength=wrap, justify="left"),
+                  "lbl_split_output").pack(anchor="w", pady=(6, 0))
+        self.lbl_split_summary = ttk.Label(tab_x, font=bold, wraplength=wrap, justify="left")
+        self.lbl_split_summary.pack(anchor="w", pady=(10, 0))
+
         # preview
         prev = self._reg(ttk.LabelFrame(mid, padding=6), "preview_first_page")
         prev.grid(row=0, column=1, sticky="nsew")
@@ -492,7 +630,7 @@ class App:
         self.btn_update_open = self._reg(ttk.Button(self.frm_update, command=self._update_open), "btn_update")
         self.btn_update_open.pack(side="right", pady=4)
 
-        self.nb.select(1 if self._mode == "shrink" else 0)
+        self.nb.select({"merge": 0, "shrink": 1, "split": 2}.get(self._mode, 0))
         self._set_status("status_ready")
         self._update_mode_controls()
 
@@ -505,11 +643,13 @@ class App:
                 pass
         self.nb.tab(0, text=t("tab_merge"))
         self.nb.tab(1, text=t("tab_shrink"))
+        self.nb.tab(2, text=t("tab_split"))
         self.tip_feedback.refresh()
         self._refresh_list()
         self._update_pages_hint()
         self._update_merge_summary()
         self._update_estimate_label()
+        self._update_split_label()
         self._update_file_info()
         if self._preview is None:
             self.lbl_preview_msg.configure(text=t("preview_empty") if not self.files else "")
@@ -584,8 +724,8 @@ class App:
     # ------------------------------------------------------------ helpers
     def mode(self) -> str:
         try:
-            return "shrink" if self.nb.index(self.nb.select()) == 1 else "merge"
-        except tk.TclError:
+            return ("merge", "shrink", "split")[self.nb.index(self.nb.select())]
+        except (tk.TclError, IndexError):
             return self._mode
 
     def merge_options(self) -> MergeOptions:
@@ -594,11 +734,18 @@ class App:
     def shrink_options(self) -> ShrinkOptions:
         return ShrinkOptions(quality=self.var_quality.get(), dpi=int(self.var_dpi.get())).validated()
 
+    def split_options(self) -> SplitOptions:
+        return SplitOptions(mode=self.var_split_mode.get(), ranges=self.var_split_ranges.get(),
+                            every=self.var_split_every.get().strip(), max_mb=self.var_split_mb.get().strip(),
+                            keep_bookmarks=bool(self.var_split_keep.get())).validated()
+
     def _save_state(self) -> None:
         settings = i18n.load_settings()
         settings["mode"] = self.mode()
         settings["merge"] = dataclasses.asdict(self.merge_options())
         settings["shrink"] = dataclasses.asdict(self.shrink_options())
+        # page ranges belong to one document, so they are not remembered
+        settings["split"] = {k: v for k, v in dataclasses.asdict(self.split_options()).items() if k != "ranges"}
         settings.update(dataclasses.asdict(self.update_prefs))
         i18n.save_settings(settings)
 
@@ -647,6 +794,8 @@ class App:
         self._save_state()
         if self._mode == "shrink":
             self._schedule_estimate()
+        elif self._mode == "split":
+            self._schedule_split_plan()
 
     def _update_mode_controls(self) -> None:
         merging = self.mode() == "merge"
@@ -734,6 +883,50 @@ class App:
                                                after=pdfops.human_size(k["after"])))
         else:
             self.lbl_estimate.configure(text="")
+
+    # ------------------------------------------------------------ split plan
+    def _on_split_option(self) -> None:
+        self._save_state()
+        self._schedule_split_plan()
+
+    def _on_split_typed(self, way: str) -> None:
+        """Typing into a way's box selects that way."""
+        if self.var_split_mode.get() != way:
+            self.var_split_mode.set(way)
+        self._schedule_split_plan()
+
+    def _schedule_split_plan(self) -> None:
+        if self.split_job:
+            self.root.after_cancel(self.split_job)
+            self.split_job = None
+        self.split_gen += 1
+        self._split_live["gen"] = self.split_gen
+        if self.mode() != "split" or self.preview_file is None or self._running:
+            self._split_view = None
+            self._split_planning = False
+            self._update_split_label()
+            return
+        self._split_planning = True
+        self._update_split_label()
+        self.split_job = self.root.after(ESTIMATE_DELAY_MS, self._start_split_plan)
+
+    def _start_split_plan(self) -> None:
+        self.split_job = None
+        path = self.preview_file
+        if path is None:
+            return
+        threading.Thread(target=_split_plan_worker, name="split-plan", daemon=True,
+                         args=(path, self.split_options(), self.split_gen, self._split_live, self.cancel_event,
+                               self.q)).start()
+
+    def _update_split_label(self) -> None:
+        if self._split_planning:
+            self.lbl_split_summary.configure(text=t("lbl_split_planning"), foreground="")
+        elif self._split_view is not None:
+            key, kwargs, bad = self._split_view
+            self.lbl_split_summary.configure(text=t(key, **kwargs), foreground=BAD_FG if bad else "")
+        else:
+            self.lbl_split_summary.configure(text="", foreground="")
 
     # ------------------------------------------------------------ files
     def _on_drop(self, event) -> None:
@@ -831,6 +1024,7 @@ class App:
         self._update_file_info()
         self._update_merge_summary()
         self._schedule_estimate()
+        self._schedule_split_plan()
         self._update_mode_controls()
 
     def remove_selected(self) -> None:
@@ -854,6 +1048,7 @@ class App:
                 self.lbl_preview_msg.configure(text=t("preview_empty"))
                 self._update_file_info()
                 self._update_mode_controls()
+                self._schedule_split_plan()
 
     def _move_selected(self, step: int) -> None:
         idx = self._selected_index()
@@ -904,6 +1099,7 @@ class App:
             self.var_pages.set(self.specs.get(path, ""))
             self._update_pages_hint()
             self._start_preview()
+            self._schedule_split_plan()
         self._update_file_info()
         self._update_mode_controls()
 
@@ -974,6 +1170,18 @@ class App:
             self._estimating = False
             self._estimate_kwargs = {"count": count, "before": before, "after": after}
             self._update_estimate_label()
+        elif kind == "split_plan":
+            _, gen, counts, problem = msg
+            if gen != self.split_gen:
+                return
+            self._split_planning = False
+            if counts is not None:
+                key = "lbl_split_summary_size" if self.split_options().mode == "size" else "lbl_split_summary"
+                self._split_view = (key, {"parts": len(counts), "counts": pdfops.counts_text(counts)}, False)
+            else:
+                key, kwargs = problem
+                self._split_view = (key, kwargs, True)
+            self._update_split_label()
         elif kind == "progress":
             _, fraction, name = msg
             self.progress.configure(value=int(fraction * PROGRESS_STEPS))
@@ -1010,6 +1218,16 @@ class App:
                     messagebox.showerror(t("dlg_error"), t("err_page_range", token=exc.token, name=os.path.basename(path),
                                                             pages=exc.pages), parent=self.root)
                     return
+        split_opts = self.split_options()
+        if mode == "split" and split_opts.mode == "ranges":
+            # the same ranges go to every file: a range a file cannot hold stops the run here
+            for path in self.files:
+                try:
+                    pdfops.parse_ranges(split_opts.ranges, self.page_counts.get(path, 0))
+                except pdfops.InvalidPageRange as exc:
+                    messagebox.showerror(t("dlg_error"), t("err_page_range", token=exc.token, name=os.path.basename(path),
+                                                            pages=exc.pages), parent=self.root)
+                    return
         self._save_state()
         total_pages = sum(self.page_counts.get(p, 0) for p in self.files)
         if total_pages >= pdfops.LARGE_PAGE_COUNT:
@@ -1022,7 +1240,7 @@ class App:
         self.worker = threading.Thread(
             target=_job_worker, name="job", daemon=True,
             args=(mode, list(self.files), dict(self.specs), self.merge_options(), self.shrink_options(),
-                  self.cancel_event, self.q))
+                  split_opts, self.cancel_event, self.q))
         self.worker.start()
 
     def _finished(self, msg_mode: str | None, info: dict | None, cancelled: bool) -> None:
@@ -1038,6 +1256,8 @@ class App:
             return
         if msg_mode == "merge":
             msg = t("msg_done_merge", files=info["files"], pages=info["pages"])
+        elif msg_mode == "split":
+            msg = t("msg_done_split", files=info["files"], parts=info["parts"])
         else:
             msg = t("msg_done_shrink", count=info["count"], before=pdfops.human_size(info["before"]),
                     after=pdfops.human_size(info["after"]))
@@ -1078,6 +1298,7 @@ class App:
         self._closing = True
         self.cancel_event.set()
         self._live["gen"] = -1
+        self._split_live["gen"] = -1
         try:
             self._save_state()
         except Exception:

@@ -1,6 +1,6 @@
-"""Merging and shrinking PDFs for pdf-merge-split.
+"""Merging, splitting and shrinking PDFs for pdf-merge-split.
 
-Two jobs, nothing uploaded anywhere, the inputs never modified:
+Three jobs, nothing uploaded anywhere, the inputs never modified:
 
 * merge  - several PDFs (each optionally cut to a page range) become one file.
   Pages are copied as objects, so text, links and annotations stay as they
@@ -10,6 +10,11 @@ Two jobs, nothing uploaded anywhere, the inputs never modified:
   the text layer, bookmarks, links and page sizes are untouched. An image is
   replaced only when the new stream is smaller than the old one, so a file
   never grows by this.
+* split  - one PDF becomes several: one file per page range, every N pages,
+  one file per top-level bookmark, or as many pages as fit under a size cap.
+  Pages are copied as objects like merging; bookmarks inside a part follow
+  it. All parts are written to temporary files first and renamed together at
+  the end, so a cancelled or failed split leaves no partial set behind.
 
 GUI and CLI share everything in this module.
 """
@@ -35,7 +40,7 @@ log = logging.getLogger("pdf_merge_split")
 pymupdf.TOOLS.mupdf_display_errors(False)
 pymupdf.TOOLS.mupdf_display_warnings(False)
 
-MODES = ("merge", "shrink")
+MODES = ("merge", "shrink", "split")
 QUALITIES = ("normal", "small", "minimum")
 JPEG_QUALITY = {"normal": 80, "small": 65, "minimum": 45}
 DPIS = (300, 200, 150)
@@ -44,6 +49,7 @@ DEFAULT_DPI = 200
 LARGE_PAGE_COUNT = 500
 MERGE_SUFFIX = "_merged"
 SHRINK_SUFFIX = "_small"
+SPLIT_SUFFIX = "_part"
 PRODUCER = "pdf-merge-split (PyMuPDF)"
 
 MIN_IMAGE_BYTES = 4096            # a stream this small is not worth re-encoding
@@ -647,5 +653,408 @@ def estimate_shrink(input_path: str, opts: ShrinkOptions, cancel: Optional[threa
             new += len(data) if data is not None else before
         saved = (old - new) * (n / len(pages))
         return size, int(max(size * 0.05, size - saved))
+    finally:
+        doc.close()
+
+
+# ---------------------------------------------------------------- splitting
+
+SPLIT_MODES = ("ranges", "every", "bookmarks", "size")
+DEFAULT_SPLIT_MODE = "every"
+DEFAULT_EVERY = 10
+EVERY_RANGE = (1, 100_000)
+DEFAULT_MAX_MB = 10.0
+MAX_MB_RANGE = (0.1, 2000.0)
+SIZE_SAFETY = 0.97                # plan parts a little under the cap; the real size is checked after saving
+PART_OVERHEAD = 4096              # trailer, xref table, catalog: bytes every part file carries anyway
+
+
+class NoBookmarks(Exception):
+    """Splitting by bookmarks, but the file has no usable top-level bookmark."""
+
+
+class NothingToSplit(Exception):
+    """The split would give back one file with every page, in order: nothing is written."""
+
+
+@dataclass
+class SplitOptions:
+    mode: str = DEFAULT_SPLIT_MODE
+    ranges: str = ""                # mode "ranges": "1-10, 11-25" -> one file per comma-separated piece
+    every: int = DEFAULT_EVERY      # mode "every": pages per file
+    max_mb: float = DEFAULT_MAX_MB  # mode "size": the cap per file, in MB (1 MB = 1024 * 1024 bytes)
+    keep_bookmarks: bool = True
+
+    def validated(self) -> "SplitOptions":
+        if self.mode not in SPLIT_MODES:
+            self.mode = DEFAULT_SPLIT_MODE
+        self.ranges = self.ranges if isinstance(self.ranges, str) else ""
+        try:
+            every = int(self.every)
+        except (TypeError, ValueError):
+            every = DEFAULT_EVERY
+        if isinstance(self.every, bool) or every < EVERY_RANGE[0]:
+            every = DEFAULT_EVERY
+        self.every = min(every, EVERY_RANGE[1])
+        try:
+            mb = float(self.max_mb)
+        except (TypeError, ValueError):
+            mb = DEFAULT_MAX_MB
+        if isinstance(self.max_mb, bool) or not math.isfinite(mb) or mb <= 0:
+            mb = DEFAULT_MAX_MB
+        self.max_mb = round(min(max(mb, MAX_MB_RANGE[0]), MAX_MB_RANGE[1]), 2)
+        self.keep_bookmarks = bool(self.keep_bookmarks)
+        return self
+
+    @property
+    def max_bytes(self) -> int:
+        return int(self.max_mb * 1024 * 1024)
+
+
+@dataclass
+class SplitPart:
+    first: int                      # 0-based, inclusive
+    last: int                       # 0-based, inclusive
+    title: Optional[str] = None     # the bookmark a part starts at (mode "bookmarks")
+
+    @property
+    def pages(self) -> int:
+        return self.last - self.first + 1
+
+
+@dataclass
+class SplitResult:
+    input_path: str
+    outputs: list[str]
+    part_pages: list[int]           # pages in each output, in order
+    pages: int                      # pages in the input
+    oversized: list[int] = field(default_factory=list)   # 1-based numbers of parts over the cap (a single page)
+    elapsed: float = 0.0
+
+
+def parse_ranges(spec: str, count: int) -> list[SplitPart]:
+    """One part per comma-separated piece of ``spec`` ("1-10, 11-25, 30-"),
+    1-based and inclusive, in the order given. Pieces may overlap or leave
+    pages out: each is simply its own file. Raises InvalidPageRange."""
+    spec = (spec or "").strip()
+    parts: list[SplitPart] = []
+    for token in re.split(r"[,;]", spec):
+        token = re.sub(r"\s+", "", token)
+        if not token:
+            continue
+        m = _RANGE.match(token)
+        if token.isdigit():
+            a = b = int(token)
+        elif m and (m.group(1) or m.group(2)):
+            a = int(m.group(1)) if m.group(1) else 1
+            b = int(m.group(2)) if m.group(2) else count
+        else:
+            raise InvalidPageRange(token, count)
+        if a < 1 or b > count or a > b:
+            raise InvalidPageRange(token, count)
+        parts.append(SplitPart(a - 1, b - 1))
+    if not parts:
+        raise InvalidPageRange(spec, count)
+    return parts
+
+
+def _bookmark_parts(doc: pymupdf.Document) -> list[SplitPart]:
+    """A part starts at every top-level bookmark. Pages before the first one form
+    a part of their own; two top-level bookmarks on one page start one part
+    (named after the first)."""
+    n = len(doc)
+    try:
+        toc = doc.get_toc(simple=True)
+    except Exception:
+        toc = []
+    starts: dict[int, str] = {}
+    for entry in toc:
+        level, title, page = entry[0], entry[1], entry[2]
+        if level == 1 and isinstance(page, int) and 1 <= page <= n:
+            starts.setdefault(page - 1, str(title))
+    if not starts:
+        raise NoBookmarks(doc.name)
+    firsts = sorted(starts)
+    parts: list[SplitPart] = []
+    if firsts[0] > 0:
+        parts.append(SplitPart(0, firsts[0] - 1))
+    for k, first in enumerate(firsts):
+        last = firsts[k + 1] - 1 if k + 1 < len(firsts) else n - 1
+        parts.append(SplitPart(first, last, starts[first]))
+    return parts
+
+
+# --- size estimate: the objects each page needs, shared objects counted once per part
+
+_REF = re.compile(r"(\d+) 0 R")
+_PARENT = re.compile(r"/Parent\s+\d+\s+0\s+R")
+
+
+class _ObjectSizes:
+    """Bytes and outgoing references of PDF objects, cached across pages."""
+
+    def __init__(self, doc: pymupdf.Document) -> None:
+        self.doc = doc
+        self.size: dict[int, int] = {}
+        self.refs: dict[int, list[int]] = {}
+        self.is_page: dict[int, bool] = {}
+
+    def _load(self, xref: int) -> None:
+        doc = self.doc
+        try:
+            text = doc.xref_object(xref, compressed=True)
+        except Exception:
+            text = ""
+        size = len(text)
+        try:
+            if doc.xref_is_stream(xref):
+                size += len(doc.xref_stream_raw(xref))
+        except Exception:
+            pass
+        kind = doc.xref_get_key(xref, "Type")[1] if text else "null"
+        self.is_page[xref] = kind in ("/Page", "/Pages")
+        self.size[xref] = size
+        # /Parent leads up the page tree to every other page: never follow it
+        self.refs[xref] = [int(r) for r in _REF.findall(_PARENT.sub("", text))]
+
+    def page_objects(self, page_xref: int) -> set[int]:
+        """Every object reachable from one page, without wandering into other pages
+        (through annotation back-pointers or link destinations)."""
+        seen: set[int] = set()
+        todo = [page_xref]
+        xref_count = self.doc.xref_length()
+        while todo:
+            x = todo.pop()
+            if x in seen or not 0 < x < xref_count:
+                continue
+            if x not in self.size:
+                self._load(x)
+            if x != page_xref and self.is_page[x]:
+                continue
+            seen.add(x)
+            todo.extend(self.refs[x])
+        return seen
+
+
+def _size_parts(doc: pymupdf.Document, limit: int, cancel: Optional[threading.Event] = None,
+                progress: Optional[Callable[[int], None]] = None) -> list[SplitPart]:
+    """Greedy: add pages to the current part while the objects they need, shared
+    ones counted once, stay under ``limit`` bytes. A single page larger than the
+    limit becomes a part of its own."""
+    sizes = _ObjectSizes(doc)
+    budget = max(1, int(limit * SIZE_SAFETY) - PART_OVERHEAD)
+    parts: list[SplitPart] = []
+    first = 0
+    used: set[int] = set()
+    total = 0
+    for i in range(len(doc)):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled(doc.name)
+        try:
+            objs = sizes.page_objects(doc[i].xref)
+        except Exception:
+            objs = set()
+        extra = sum(sizes.size.get(x, 0) for x in objs - used)
+        if i > first and total + extra > budget:
+            parts.append(SplitPart(first, i - 1))
+            first, used, total = i, set(), 0
+            extra = sum(sizes.size.get(x, 0) for x in objs)
+        used |= objs
+        total += extra
+        if progress:
+            progress(i + 1)
+    parts.append(SplitPart(first, len(doc) - 1))
+    return parts
+
+
+def plan_split(doc: pymupdf.Document, opts: SplitOptions, cancel: Optional[threading.Event] = None,
+               progress: Optional[Callable[[int], None]] = None) -> list[SplitPart]:
+    """The parts one document turns into. Raises InvalidPageRange (mode
+    "ranges"), NoBookmarks (mode "bookmarks"), EmptyDocument, NothingToSplit."""
+    opts = opts.validated()
+    n = len(doc)
+    if n == 0:
+        raise EmptyDocument(doc.name)
+    if opts.mode == "ranges":
+        parts = parse_ranges(opts.ranges, n)
+    elif opts.mode == "bookmarks":
+        parts = _bookmark_parts(doc)
+    elif opts.mode == "size":
+        parts = _size_parts(doc, opts.max_bytes, cancel, progress)
+    else:
+        parts = [SplitPart(a, min(a + opts.every, n) - 1) for a in range(0, n, opts.every)]
+    # mode "size" decides this from real sizes (split_pdf), not from the estimate
+    if opts.mode != "size" and _whole(parts, n):
+        raise NothingToSplit(doc.name)
+    return parts
+
+
+def _whole(parts: list[SplitPart], n: int) -> bool:
+    return len(parts) == 1 and parts[0].first == 0 and parts[0].last == n - 1
+
+
+def split_output_paths(input_path: str, count: int) -> list[str]:
+    """<name>_part01.pdf ... next to the input, numbered with at least two
+    digits. If any of them is taken (by a file or a folder), the whole set moves
+    to <name>_part01(2).pdf ..., then (3) and so on: one run's files always
+    share one suffix and nothing is overwritten."""
+    base, _ = os.path.splitext(input_path)
+    width = max(2, len(str(count)))
+    k = 1
+    while True:
+        tail = "" if k == 1 else f"({k})"
+        paths = [f"{base}{SPLIT_SUFFIX}{i:0{width}d}{tail}.pdf" for i in range(1, count + 1)]
+        if not any(os.path.exists(p) for p in paths):
+            return paths
+        k += 1
+
+
+def _part_toc(src_toc: list, part: SplitPart, keep: bool) -> list[list]:
+    """Bookmarks of the pages inside a part, moved to the part's page numbers.
+    A part that starts inside a chapter lifts its entries as a group (two
+    sibling sections stay siblings); levels start at 1 and never jump by more
+    than one."""
+    if not keep:
+        return []
+    kept = [(max(int(e[0]), 1), str(e[1]), e[2]) for e in src_toc
+            if isinstance(e[2], int) and part.first + 1 <= e[2] <= part.last + 1]
+    if not kept:
+        return []
+    base = min(level for level, _t, _p in kept) - 1
+    out: list[list] = []
+    for level, title, page in kept:
+        prev = out[-1][0] if out else 0
+        out.append([min(level - base, prev + 1), title, page - part.first])
+    return out
+
+
+def _write_part(src: pymupdf.Document, part: SplitPart, tmp: str, meta: dict, toc: list, title: Optional[str]) -> int:
+    out = pymupdf.open()
+    try:
+        out.insert_pdf(src, from_page=part.first, to_page=part.last)
+        m = dict(meta)
+        if title:
+            m["title"] = title
+        m["producer"] = PRODUCER
+        try:
+            out.set_metadata(m)
+        except Exception as exc:
+            log.info("metadata not set: %s", exc)
+        if toc:
+            try:
+                out.set_toc(toc)
+            except Exception as exc:         # a malformed outline must not cost the part
+                log.info("bookmarks not written: %s", exc)
+        out.save(tmp, garbage=4, deflate=True)
+    finally:
+        out.close()
+    return os.path.getsize(tmp)
+
+
+def split_pdf(
+    input_path: str,
+    opts: SplitOptions,
+    progress: Optional[Callable[[int, int], None]] = None,
+    cancel: Optional[threading.Event] = None,
+) -> SplitResult:
+    """Split one PDF into parts written next to it (<name>_part01.pdf ...). The
+    input is never modified. Every part is saved to a temporary file first; only
+    when all of them are done are they renamed, so a cancel (Cancelled) or an
+    error leaves no part behind. With mode "size" each saved part is measured and
+    a part over the cap is halved and saved again; a single page over the cap
+    stays a part of its own and is reported in ``oversized``."""
+    opts = opts.validated()
+    t0 = time.perf_counter()
+    doc = open_pdf(input_path)
+    temps: list[str] = []
+    try:
+        n = len(doc)
+        if n == 0:
+            raise EmptyDocument(input_path)
+        sizing = opts.mode == "size"
+        done = 0
+        total = [n]                   # pages to write (parts may overlap in mode "ranges")
+
+        def step(k: int = 1) -> None:
+            nonlocal done
+            done += k
+            if progress:
+                progress(min(done, total[0]), total[0])
+
+        if sizing:
+            if os.path.getsize(input_path) <= opts.max_bytes:
+                raise NothingToSplit(input_path)
+            total[0] = 2 * n          # first pass: measure every page; second: write them
+            parts = plan_split(doc, opts, cancel, lambda p: progress and progress(p, total[0]))
+            done = n
+        else:
+            parts = plan_split(doc, opts, cancel)
+            total[0] = sum(p.pages for p in parts)
+        meta = {k: v for k, v in (doc.metadata or {}).items()
+                if k in ("title", "author", "subject", "keywords", "creator") and v}
+        try:
+            src_toc = doc.get_toc(simple=True)
+        except Exception:
+            src_toc = []
+        folder = os.path.dirname(os.path.abspath(input_path))
+        written: list[tuple[SplitPart, str, int]] = []
+        queue_ = list(parts)
+        serial = 0
+        while queue_:
+            part = queue_.pop(0)
+            if cancel is not None and cancel.is_set():
+                raise Cancelled(input_path)
+            serial += 1
+            tmp = os.path.join(folder, f".split-{os.getpid()}-{serial}.part")
+            temps.append(tmp)
+            size = _write_part(doc, part, tmp, meta, _part_toc(src_toc, part, opts.keep_bookmarks), part.title)
+            if sizing and size > opts.max_bytes and part.pages > 1:
+                # the estimate was off for this stretch: halve it and try both halves again
+                os.remove(tmp)
+                temps.remove(tmp)
+                mid = part.first + part.pages // 2 - 1
+                queue_[0:0] = [SplitPart(part.first, mid, part.title), SplitPart(mid + 1, part.last)]
+                continue
+            written.append((part, tmp, size))
+            step(part.pages)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled(input_path)
+        if _whole([p for p, _t, _s in written], n):
+            # mode "size": the whole file, saved again, already fits under the cap
+            raise NothingToSplit(input_path)
+        outputs = split_output_paths(input_path, len(written))
+        for (_part, tmp, _size), final in zip(written, outputs):
+            os.rename(tmp, final)          # unlike os.replace, never overwrites a file that appeared meanwhile
+            temps.remove(tmp)
+        oversized = [k + 1 for k, (_p, _t, size) in enumerate(written) if sizing and size > opts.max_bytes]
+        return SplitResult(input_path, outputs, [p.pages for p, _t, _s in written], n, oversized,
+                           time.perf_counter() - t0)
+    finally:
+        doc.close()
+        for tmp in temps:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def counts_text(counts: list[int], limit: int = 8) -> str:
+    """Pages per part for a summary line: "10, 10, 5", or "10, 10, 10, ..., 10, 5"
+    when there are more than ``limit`` parts. Digits only, so every language uses it."""
+    if len(counts) <= limit:
+        return ", ".join(str(c) for c in counts)
+    head = ", ".join(str(c) for c in counts[: limit - 2])
+    return f"{head}, ..., {counts[-2]}, {counts[-1]}"
+
+
+def preview_split(input_path: str, opts: SplitOptions, cancel: Optional[threading.Event] = None) -> list[int]:
+    """Pages per part as the plan stands (mode "size": as estimated, before the
+    saved parts are measured). Raises what plan_split raises."""
+    opts = opts.validated()
+    if opts.mode == "size" and os.path.getsize(input_path) <= opts.max_bytes:
+        raise NothingToSplit(input_path)
+    doc = open_pdf(input_path)
+    try:
+        return [p.pages for p in plan_split(doc, opts, cancel)]
     finally:
         doc.close()

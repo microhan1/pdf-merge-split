@@ -1,8 +1,8 @@
-# Chaekgalpi Tools – PDF Merge & Compress
+# Chaekgalpi Tools – PDF Merge, Split & Compress
 
 [한국어](README.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-Drop several PDFs to **merge** them into one, or re-encode their images to **compress** them. A Windows program that uploads nothing: contracts, medical records, scanned books - anything you would rather not hand to someone's server - stay on your PC. No server (except the update check, which can be turned off), no install, no page limit, the originals are never modified.
+Drop several PDFs to **merge** them into one, re-encode their images to **compress** them, or **split** one file into several. A Windows program that uploads nothing: contracts, medical records, scanned books - anything you would rather not hand to someone's server - stay on your PC. No server (except the update check, which can be turned off), no install, no page limit, the originals are never modified.
 
 ![The program window](docs/gui_en.png)
 
@@ -22,11 +22,16 @@ python main.py
 2. Pick a tab.
    - **Merge**: each file can be limited to a page range (`1-10, 15, 20-`). Every file's bookmarks (outline) go in under an entry named after the file. Output: `<first file>_merged.pdf`.
    - **Compress**: choose the image quality (normal, small, minimum) and a resolution ceiling (300, 200, 150 dpi); an estimated size is shown. Only the images are re-encoded - text (search), bookmarks, links and page sizes stay as they are. Output: `<name>_small.pdf`.
+   - **Split**: one file per page range (`1-10, 11-25`), every N pages, one file per top-level bookmark (chapter), or as many pages as fit under a size limit (MB). Before you run, it shows how many files the selected PDF turns into. Each part keeps the bookmarks and links of its pages. Output: `<name>_part01.pdf`, `<name>_part02.pdf` ...
 3. Press **Run**. The result is written next to the original; an existing name gets `(2)`, `(3)`, and the original is never touched.
 
 ![After a compress run](docs/done_ko.png)
 
 *The sample scan (3 pages, 2.0 MB) compressed with "normal, 200 dpi" (Korean screen). Numbers depend on the file.*
+
+![The Split tab](docs/split_en.png)
+
+*The sample report (6 pages, 3 chapters) with "One file per top-level bookmark" chosen. Before running it shows "Selected file → 3 files (2, 2, 2 pages)".*
 
 There is a command line too.
 
@@ -35,6 +40,10 @@ python main.py a.pdf b.pdf c.pdf --merge
 python main.py a.pdf b.pdf --merge --pages 1-10 --pages all
 python main.py scan.pdf --shrink --quality small --dpi 150
 python main.py scans/ --shrink
+python main.py book.pdf --split --every 50
+python main.py book.pdf --split --ranges "1-10, 11-25"
+python main.py book.pdf --split --by-bookmarks
+python main.py scan.pdf --split --max-mb 10
 ```
 
 `python main.py --help` prints the options in your OS language (한국어 · English · 中文 · 日本語).
@@ -55,7 +64,6 @@ When a newer version exists a one-line notice appears at the bottom of the windo
 
 ## What it does not do
 
-- Splitting (page ranges, every N pages, by bookmark) is planned for v0.2.
 - No OCR, no text editing, no rotation or margin cropping (margins: [TrimPDF](https://github.com/microhan1/TrimPDF)).
 - Password-protected PDFs are skipped with a message. It does not remove passwords.
 - Compressing only re-encodes images. A text-only PDF barely shrinks; a file that would not get smaller is reported and no result is written. 1-bit (fax-like) images and images with a transparency mask are left as they are.

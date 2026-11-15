@@ -85,7 +85,8 @@ def problems(app) -> list[str]:
     widgets = [(w, key) for w, key, attr in app._texts if attr == "text" and w.winfo_class() != "TLabelframe"]
     widgets += [(app.lbl_update, "lbl_update"), (app.lbl_merge_summary, "lbl_merge_summary"),
                 (app.lbl_estimate, "lbl_estimate"), (app.lbl_pages_hint, "lbl_pages_hint"),
-                (app.lbl_file_info, "lbl_file_info"), (app.lbl_status, "lbl_status")]
+                (app.lbl_file_info, "lbl_file_info"), (app.lbl_status, "lbl_status"),
+                (app.lbl_split_summary, "lbl_split_summary")]
     for w, key in widgets:
         if not w.winfo_ismapped() or not w.cget("text"):
             continue
@@ -95,7 +96,7 @@ def problems(app) -> list[str]:
             out.append(f"{key}: squeezed to {w.winfo_height()}px of {w.winfo_reqheight()}")
         if not inside(w, win):
             out.append(f"{key}: outside the window")
-    for i in range(2):
+    for i in range(3):
         if not app.nb.tab(i, "text"):
             out.append(f"tab {i}: no text")
     return out
@@ -108,8 +109,14 @@ def test_nothing_is_cut_off(make_app, lang, notice):
     assert pump(app, lambda: app._preview is not None)
     if notice:
         assert pump(app, lambda: bool(app.frm_update.winfo_manager()))
-    for tab in (0, 1):
+    for tab in (0, 1, 2):
         app.nb.select(tab)
+        if tab == 2:
+            # the longest summary the split tab shows (mode "size", two lines in most languages)
+            app.var_split_mode.set("size")
+            app.var_split_mb.set("0.004")
+            app._on_split_option()
+            pump(app, lambda: not app._split_planning and bool(app.lbl_split_summary.cget("text")), timeout=15)
         for size in ("1060x760", "940x700"):
             app.root.geometry(size)
             pump(app, lambda: False, timeout=0.4)

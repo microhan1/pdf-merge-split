@@ -11,7 +11,7 @@ the sample PDFs are copied to a temporary folder first so no result lands in
 the repository.
 
 Files written per language:  gui_<lang>.png (merge tab), shrink_<lang>.png,
-feedback_<lang>.png (the header row with the [Send feedback] link).
+split_<lang>.png (split tab, report A by bookmarks), feedback_<lang>.png (the header row with the [Send feedback] link).
 For Korean also: done_ko.png (after a shrink run), update_notice.png, and the
 layout check that the notice moves nothing above it.
 """
@@ -179,6 +179,16 @@ def shoot(lang: str, out: str, notice: bool) -> None:
     pump(app, lambda: app._estimate_kwargs is not None and not app._estimating, 60)
     pump(app, lambda: False, 0.4)
     grab(app.root).save(os.path.join(out, f"shrink_{lang}.png"))
+    # split tab: report A (6 pages, 3 chapters) split by its top-level bookmarks
+    app._select_file(0)
+    app.nb.select(2)
+    app.var_split_mode.set("bookmarks")
+    app._on_split_option()
+    pump(app, lambda: not app._split_planning and app.split_job is None and bool(app.lbl_split_summary.cget("text")), 30)
+    pump(app, lambda: False, 0.4)
+    grab(app.root).save(os.path.join(out, f"split_{lang}.png"))
+    app.nb.select(1)
+    pump(app, lambda: False, 0.3)
     if lang == "ko":
         app.clear_files()
         app.add_paths([files[2]])

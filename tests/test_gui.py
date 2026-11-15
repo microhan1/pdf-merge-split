@@ -471,7 +471,7 @@ def test_language_switch_rewords_everything(env, tmp_path):
     app.add_paths([a])
     app.cmb_lang.current(i18n.LANGS.index("ko"))
     app._on_lang()
-    assert app.root.title().startswith("PDF 합치기·용량 줄이기 v")
+    assert app.root.title().startswith("PDF 합치기·나누기·용량 줄이기 v")
     assert app.nb.tab(0, "text") == "합치기" and app.nb.tab(1, "text") == "용량 줄이기"
     assert app.lst_files.get(0).startswith("1. sample_report_a.pdf  (6쪽")
     assert app.btn_run.cget("text") == "실행" and app.lbl_status.cget("text") == "준비"

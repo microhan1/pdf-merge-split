@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
     else:
         env.update(HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                    https_proxy="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9", NO_PROXY="", no_proxy="")
-    titles = {"ko": "PDF 합치기·용량 줄이기", "en": "PDF Merge & Compress", "zh-CN": "PDF 合并·压缩", "ja": "PDF 結合・圧縮"}
+    titles = {"ko": "PDF 합치기·나누기·용량 줄이기", "en": "PDF Merge, Split & Compress", "zh-CN": "PDF 合并·拆分·压缩", "ja": "PDF 結合・分割・圧縮"}
     expect = f"{titles[lang]} v{APP_VERSION}"
     t0 = time.time()
     proc = subprocess.Popen([exe], env=env, cwd=work)

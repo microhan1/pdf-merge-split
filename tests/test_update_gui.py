@@ -200,7 +200,7 @@ def test_notice_leaves_the_rest_of_the_window_in_place(env):
 
 def test_window_title_carries_the_version(env):
     app = start(env)
-    assert app.root.title() == f"PDF Merge & Compress v{APP_VERSION}"
+    assert app.root.title() == f"PDF Merge, Split & Compress v{APP_VERSION}"
     close(app)
 
 

@@ -4,6 +4,10 @@
     python main.py a.pdf b.pdf c.pdf --merge        -> a_merged.pdf
     python main.py a.pdf b.pdf --merge --pages 1-10 --pages all
     python main.py scan.pdf --shrink --quality small --dpi 150   -> scan_small.pdf
+    python main.py book.pdf --split --every 50                   -> book_part01.pdf ...
+    python main.py book.pdf --split --ranges "1-10, 11-25"
+    python main.py book.pdf --split --by-bookmarks
+    python main.py scan.pdf --split --max-mb 10
 """
 from __future__ import annotations
 
@@ -53,7 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     g = p.add_mutually_exclusive_group()
     g.add_argument("--merge", action="store_true", help=t("cli_merge"))
     g.add_argument("--shrink", action="store_true", help=t("cli_shrink"))
+    g.add_argument("--split", action="store_true", help=t("cli_split"))
     p.add_argument("--pages", action="append", default=[], metavar="RANGE", help=t("cli_pages"))
+    w = p.add_mutually_exclusive_group()
+    w.add_argument("--ranges", metavar="SPEC", help=t("cli_ranges"))
+    w.add_argument("--every", type=int, metavar="N", help=t("cli_every"))
+    w.add_argument("--by-bookmarks", action="store_true", help=t("cli_by_bookmarks"))
+    w.add_argument("--max-mb", type=float, metavar="MB", help=t("cli_max_mb"))
     p.add_argument("--no-bookmarks", dest="keep_bookmarks", action="store_false", default=True,
                    help=t("cli_no_bookmarks"))
     p.add_argument("--quality", choices=pdfops.QUALITIES, default=pdfops.DEFAULT_QUALITY, help=t("cli_quality"))
@@ -154,6 +164,74 @@ def _run_shrink(files: list[str], args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _split_options(args: argparse.Namespace) -> pdfops.SplitOptions | None:
+    """The split asked for on the command line, or None when no way was given."""
+    if args.ranges is not None:
+        mode = "ranges"
+    elif args.every is not None:
+        mode = "every"
+    elif args.by_bookmarks:
+        mode = "bookmarks"
+    elif args.max_mb is not None:
+        mode = "size"
+    else:
+        return None
+    return pdfops.SplitOptions(mode=mode, ranges=args.ranges or "",
+                               every=args.every if args.every is not None else pdfops.DEFAULT_EVERY,
+                               max_mb=args.max_mb if args.max_mb is not None else pdfops.DEFAULT_MAX_MB,
+                               keep_bookmarks=args.keep_bookmarks).validated()
+
+
+def _run_split(files: list[str], opts: pdfops.SplitOptions) -> int:
+    failures = processed = parts = 0
+    for idx, path in enumerate(files, 1):
+        name = os.path.basename(path)
+        try:
+            pages, _size = pdfops.inspect_pdf(path)
+        except pdfops.PasswordRequired:
+            print(t("err_password", name=name), file=sys.stderr)
+            failures += 1
+            continue
+        except pdfops.EmptyDocument:
+            print(t("err_empty_pdf", name=name), file=sys.stderr)
+            failures += 1
+            continue
+        except Exception:
+            print(t("err_open_failed", name=name), file=sys.stderr)
+            failures += 1
+            continue
+        print(t("cli_processing", index=idx, total=len(files), name=name, pages=pages))
+        try:
+            r = pdfops.split_pdf(path, opts, progress=_progress)
+        except pdfops.NothingToSplit:
+            print("\n" + t("err_nothing_to_split", name=name))
+            continue
+        except pdfops.NoBookmarks:
+            print("\n" + t("err_no_bookmarks", name=name), file=sys.stderr)
+            failures += 1
+            continue
+        except pdfops.InvalidPageRange as exc:
+            print("\n" + t("err_page_range", token=exc.token, name=name, pages=exc.pages), file=sys.stderr)
+            failures += 1
+            continue
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # one bad file must not end the batch
+            print("\n" + t("err_file_failed", name=name, error=exc), file=sys.stderr)
+            failures += 1
+            continue
+        print()
+        for out in r.outputs:
+            print(t("log_saved", path=out))
+        print(t("log_split_summary", pages=r.pages, parts=len(r.outputs), counts=pdfops.counts_text(r.part_pages)))
+        if r.oversized:
+            print(t("log_split_oversized", count=len(r.oversized), mb=f"{opts.max_mb:g}"))
+        processed += 1
+        parts += len(r.outputs)
+    print(t("msg_done_split", files=processed, parts=parts))
+    return 1 if failures else 0
+
+
 def run_cli(args: argparse.Namespace) -> int:
     files = pdfops.collect_pdfs(args.inputs)
     missing = [p for p in args.inputs if not os.path.exists(p)]
@@ -162,10 +240,24 @@ def run_cli(args: argparse.Namespace) -> int:
     if not files:
         print(t("cli_no_input"), file=sys.stderr)
         return 2
-    if not args.merge and not args.shrink:
+    split_opts = _split_options(args)
+    if split_opts is not None and (args.merge or args.shrink):
+        print(t("cli_split_option_alone"), file=sys.stderr)
+        return 2
+    if split_opts is not None:
+        args.split = True                    # --every 50 alone means --split --every 50
+    if not (args.merge or args.shrink or args.split):
         print(t("cli_need_mode"), file=sys.stderr)
         return 2
-    code = _run_merge(files, args) if args.merge else _run_shrink(files, args)
+    if args.split and split_opts is None:
+        print(t("cli_need_split_mode"), file=sys.stderr)
+        return 2
+    if args.merge:
+        code = _run_merge(files, args)
+    elif args.shrink:
+        code = _run_shrink(files, args)
+    else:
+        code = _run_split(files, split_opts)
     return 1 if missing and code == 0 else code
 
 

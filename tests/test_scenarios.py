@@ -115,5 +115,39 @@ def test_random_merge_and_shrink(tmp_path, seed):
         for i in range(min(pages, 3)):
             looks_the_same(path, s.output_path, i, limit=10.0)
 
+    # ---- split every document in a random way
+    for path, pages, _has_images in docs:
+        way = rng.choice(pdfops.SPLIT_MODES)
+        if way == "ranges":
+            spec, selected = random_spec(rng, pages)
+            spec = spec if spec not in ("", "all") else f"1-{pages}"
+            opts = pdfops.SplitOptions("ranges", ranges=spec)
+        elif way == "every":
+            opts = pdfops.SplitOptions("every", every=rng.randint(1, 4))
+        elif way == "size":
+            opts = pdfops.SplitOptions("size", max_mb=max(0.1, round(os.path.getsize(path) / (1024 * 1024) / rng.choice([2, 3]), 2)))
+        else:
+            opts = pdfops.SplitOptions("bookmarks")
+        src_texts = texts(path)
+        try:
+            r = pdfops.split_pdf(path, opts)
+        except (pdfops.NothingToSplit, pdfops.NoBookmarks):
+            continue
+        got = [t for out in r.outputs for t in texts(out)]
+        if way == "ranges":
+            expect = [src_texts[i] for p in pdfops.parse_ranges(opts.ranges, pages) for i in range(p.first, p.last + 1)]
+            assert got == expect, (path, opts)
+        else:
+            assert got == src_texts, (path, opts)            # every page once, in order
+        if way == "size":
+            cap = opts.validated().max_bytes
+            for k, out in enumerate(r.outputs, 1):
+                assert os.path.getsize(out) <= cap or k in r.oversized, (path, opts, k)
+        for out in r.outputs:
+            d = pymupdf.open(out)
+            for level, _title, page in d.get_toc(simple=True):
+                assert 1 <= page <= len(d) and level >= 1
+            d.close()
+
     assert {p: fx.sha1(p) for p, _, _ in docs} == hashes
     assert not [n for n in os.listdir(folder) if n.endswith(".part")]
